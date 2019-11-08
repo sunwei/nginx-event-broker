@@ -100,17 +100,17 @@ static ngx_command_t ngx_http_event_broker_commands[] = {
 };
 
 static ngx_http_module_t ngx_http_event_broker_module_ctx = {
-  ngx_http_event_broker_pre_conf,
-  ngx_http_event_broker_post_conf,
+  ngx_http_eb_pre_conf,
+  ngx_http_eb_post_conf,
 
-  ngx_http_event_broker_create_main_conf,
-  ngx_http_event_broker_init_main_conf,
+  ngx_http_eb_create_main_conf,
+  ngx_http_eb_init_main_conf,
 
   NULL, /* create server configuration */
   NULL, /* merge server configuration */
 
-  ngx_http_event_broker_create_loc_conf,
-  ngx_http_event_broker_merge_loc_conf
+  ngx_http_eb_create_loc_conf,
+  ngx_http_eb_merge_loc_conf
 };
 
 ngx_module_t ngx_http_event_broker_module = {
@@ -128,19 +128,50 @@ ngx_module_t ngx_http_event_broker_module = {
   NGX_MODULE_V1_PADDING
 };
 
-static ngx_int_t ngx_http_event_broker_pre_conf(ngx_conf_t *cf) {
+static void * ngx_http_eb_create_main_conf(ngx_conf_t *cf) {
+  ngx_http_event_broker_main_conf_t *mcf;
+  
+  mcf = ngx_pcalloc(cf->pool, sizeof(ngx_http_event_broker_main_conf_t));
+  if (mcf == NULL) {
+    ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0, "event broker, %s", "main configuration alloc error");
+    return NGX_CONF_ERROR;
+  }
+
+  mcf->shm_ctx = ngx_pcalloc(cf->pool, sizeof(ngx_http_event_broker_shm_ctx_t));
+  if (mcf->shm_ctx == NULL) {
+    ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0, "event broker, %s", "shared memory context alloc error");
+    return NGX_CONF_ERROR;
+  }    
+
+  ngx_str_set(&mcf->shm_ctx->shm_zone_name , "ngx_eb_shm_capacity");
+
+  mcf->shm_ctx->shared_mem = NULL;
+  mcf->topics = NGX_CONF_UNSET_PTR;
+  mcf->split_delim.len = 0;
+  mcf->saved_path.len = 0;
+
+  return mcf;
+}
+
+static char * ngx_http_eb_init_main_conf(ngx_conf_t *cf, void *conf) {
+  return NGX_CONF_OK;
+}
+
+static ngx_int_t ngx_http_eb_pre_conf(ngx_conf_t *cf) {
 #if (NGX_THREADS)
   ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0, "event broker, %s", " with aio threads feature");
 #endif
   return NGX_OK;
 }
 
-static ngx_int_t ngx_http_event_broker_post_conf(ngx_conf_t *cf) {
+static ngx_int_t ngx_http_eb_post_conf(ngx_conf_t *cf) {
   ngx_http_event_broker_main_conf_t *mcf;
   mcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_event_broker_module);
   
   if (mcf != NULL ) {
     ngx_http_handler_pt        *handler;
+    ngx_str_t                  default_size;
+    ngx_shm_zone_t             *shm_zone;
     ngx_http_core_main_conf_t  *core_main_conf;
     core_main_conf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
     
@@ -148,7 +179,7 @@ static ngx_int_t ngx_http_event_broker_post_conf(ngx_conf_t *cf) {
     if(NULL == handler){
       return NGX_ERROR;
     }
-    *handler = ngx_http_event_broker_rewrite_handler;
+    *handler = ngx_http_eb_rewrite_handler;
     
 #if (nginx_version > 1013003)
     ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0, "event broker, %s", "USING NGX_HTTP_PRECONTENT_PHASE");
@@ -161,13 +192,11 @@ static ngx_int_t ngx_http_event_broker_post_conf(ngx_conf_t *cf) {
     if(NULL == handler){
       return NGX_ERROR;
     }
-    *handler = ngx_http_event_broker_precontent_handler;
-  }
-  
-  if (mcf != NULL && !mcf->is_cache_defined ) {
+    *handler = ngx_http_eb_precontent_handler;
+    
     ngx_conf_log_error(NGX_LOG_DEBUG, cf,   0, "event broker, %s", "Init Default Share memory with 10mb");
-    ngx_str_t default_size = ngx_string("10M");
-    ngx_shm_zone_t *shm_zone = ngx_shared_memory_add(cf, &mcf->shm_ctx->shm_zone_name, ngx_parse_size(&default_size), &ngx_http_event_broker_module);
+    default_size = ngx_string("10M");
+    shm_zone = ngx_shared_memory_add(cf, &mcf->shm_ctx->shm_zone_name, ngx_parse_size(&default_size), &ngx_http_event_broker_module);
     if(NULL == shm_zone){
       ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "event broker, %s", "Unable to allocate memory with specified size");
       return NGX_ERROR;
@@ -179,14 +208,17 @@ static ngx_int_t ngx_http_event_broker_post_conf(ngx_conf_t *cf) {
   return NGX_OK;
 }
 
-static ngx_int_t ngx_http_event_broker_rewrite_handler(ngx_http_request_t *r) {
+static ngx_int_t ngx_http_eb_rewrite_handler(ngx_http_request_t *r) {
   
-  ngx_http_event_broker_loc_conf_t  *lcf = ngx_http_get_module_loc_conf(r, ngx_http_event_broker_module);
-  ngx_http_event_broker_main_conf_t *mcf = ngx_http_get_module_main_conf(r, ngx_http_event_broker_module);
+  ngx_http_event_broker_main_conf_t *mcf;
+  ngx_http_event_broker_loc_conf_t  *lcf;
   ngx_http_event_broker_ctx_t *ctx;
   ngx_int_t req_conf;
   abqueue_t *targeted_q = NULL;
   ngx_str_t target_topic;
+  
+  mcf = ngx_http_get_module_main_conf(r, ngx_http_event_broker_module);
+  lcf = ngx_http_get_module_loc_conf(r, ngx_http_event_broker_module);
 
   if (ngx_http_complex_value(r, &lcf->target_topic$, &target_topic) != NGX_OK) {
     ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "%s", "No target topic set");
@@ -212,7 +244,7 @@ static ngx_int_t ngx_http_event_broker_rewrite_handler(ngx_http_request_t *r) {
       }
     }
 
-    ctx = create_eb_context(r);
+    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_event_broker_ctx_t));
     if (ctx == NULL) {
       ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Insufficient Memory to create event broker context structure");
       return NGX_HTTP_INTERNAL_SERVER_ERROR;
@@ -224,16 +256,16 @@ static ngx_int_t ngx_http_event_broker_rewrite_handler(ngx_http_request_t *r) {
       return NGX_DECLINED;
     }
 
-    rc = ngx_http_read_client_request_body(r, ngx_http_eb_client_body_handler);
+    req_conf = ngx_http_read_client_request_body(r, ngx_http_eb_client_body_handler);
 
-    if (rc == NGX_ERROR || rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+    if (req_conf == NGX_ERROR || req_conf >= NGX_HTTP_SPECIAL_RESPONSE) {
 #if (nginx_version < 1002006) || (nginx_version >= 1003000 && nginx_version < 1003009)
       r->main->count--;
 #endif
-      return rc;
+      return req_conf;
     }
 
-    if (rc == NGX_AGAIN) {
+    if (req_conf == NGX_AGAIN) {
       ctx->waiting_more_body = 1;
       return NGX_DONE;
     }
@@ -242,7 +274,7 @@ static ngx_int_t ngx_http_event_broker_rewrite_handler(ngx_http_request_t *r) {
   } else {
     ctx = ngx_http_get_module_ctx(r, ngx_http_event_broker_module);
     if (ctx == NULL) {
-      ctx = create_eb_context(r);
+      ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_event_broker_ctx_t));
         if (ctx == NULL) {
           ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Insufficient Memory to create event broker context structure");
           return NGX_HTTP_INTERNAL_SERVER_ERROR;
@@ -254,16 +286,119 @@ static ngx_int_t ngx_http_event_broker_rewrite_handler(ngx_http_request_t *r) {
   }
 }
 
-ngx_http_event_broker_ctx_t* create_eb_context(ngx_http_request_t *r){
-  return ngx_pcalloc(r->pool, sizeof(ngx_http_event_broker_ctx_t));
-}
-
 void init_eb_context(ngx_http_event_broker_ctx_t *ctx, ngx_http_request_t *r, abqueue_t *targeted_q, ngx_str_t *target_topic){
   ctx->r = r;
   ctx->req_conf = NGX_CONF_UNSET;
   ctx->targeted_topic_q = targeted_q;
   ctx->target_topic.data = target_topic->data;
   ctx->target_topic.len = target_topic->len;
+}
+
+static ngx_int_t ngx_http_eb_precontent_handler(ngx_http_request_t *r) {
+  ngx_http_event_broker_main_conf_t *mcf;
+  ngx_http_event_broker_ctx_t       *ctx;
+  ngx_thread_pool_t                 *tp;
+  ngx_http_core_loc_conf_t          *clcf;
+
+  mcf = ngx_http_get_module_main_conf(r, ngx_http_event_broker_module);
+  ctx = ngx_http_get_module_ctx(r, ngx_http_event_broker_module);
+  
+  if (ctx == NULL) {
+    ngx_log_error(NGX_LOG_EMERG, r->connection->log, 0, "error while processing request");
+    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  } else if (ctx->targeted_topic_q == NULL) {
+    ngx_log_error(NGX_LOG_EMERG, r->connection->log, 0, "request not for event broker");
+    return NGX_DECLINED;
+  }
+
+  if (ctx->req_conf != NGX_CONF_UNSET) {
+    ngx_http_eb_output_filter(r);
+    // TODO
+    return NGX_DONE;
+  }
+
+  ctx->shared_mem = mcf->shm_ctx->shared_mem;
+  ctx->req_conf = NGX_HTTP_INTERNAL_SERVER_ERROR;
+
+  if (r->method & (NGX_HTTP_POST)) {
+    ngx_str_t *body = NULL;
+    
+    body = get_request_body(r);
+
+    if (body) {
+      ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "request_content=%*s \n", len, body);
+      ctx->payload.data = body->data;
+      ctx->payload.len = body->len;
+    } else {
+      ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "%s\n", "No data received to enqueue");
+      return NGX_HTTP_BAD_REQUEST;
+    }
+  } else {
+    if (ngx_http_discard_request_body(r) != NGX_OK) {
+      return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+  }
+
+  clcf  = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+  tp = clcf->thread_pool;
+
+  if (tp == NULL) {
+    ngx_log_error(NGX_LOG_WARN, r->connection->log, 0, "processing with single thread, enable \"aio threads;\" in server/loc block for concurrent request");
+    ngx_http_eb_process(r, ctx);
+    ngx_http_eb_output_filter(r);
+    
+    return NGX_DONE;
+  } else {
+    ngx_thread_task_t *task = ngx_thread_task_alloc(r->pool, sizeof(ngx_http_request_t));
+    ngx_memcpy(task->ctx, r, sizeof(ngx_http_request_t));
+    task->handler = ngx_http_eb_process_t_handler;
+    task->event.data = r;
+    task->event.handler = ngx_http_eb_after_t_handler;
+    
+    if(ngx_thread_task_post(tp, task) != NGX_OK) {
+        return NGX_ERROR;
+    }
+    r->main->blocked++;
+    r->aio = 1;
+    return NGX_DONE;
+  }
+
+  return NGX_DONE;
+}
+
+ngx_str_t* get_request_body(ngx_http_request_t *r){
+  u_char         *body, *tmp_body = NULL;
+  size_t         len;
+  ngx_chain_t    *bufs;
+  ngx_str_t      buf = NULL;
+  
+  if(r->request_body != NULL && r->request_body->bufs != NULL) {
+    len = 0;
+    for(bufs=r->request_body->bufs; bufs; bufs=bufs->next){
+      if(bufs->buf->in_file){
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "insufficient client_body_buffer_size");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+      }
+      len += bufs->buf->last - bufs->buf->pos;
+    }
+    if(len > 0){
+      body = ngx_palloc(r->pool, len);
+      if(NULL != buf){
+        tmp_body = body;
+        for(bufs=r->request_body->bufs; bufs; bufs=bufs->next){
+          tmp_body = ngx_copy(tmp_body, bufs->buf->pos, bufs->buf->last - bufs->buf->pos);
+        }
+      }
+    }
+  }
+  
+  buf = ngx_pcalloc(r->pool, sizeof(ngx_str_t));
+  if (buf != NULL) {
+    buf.data = body;
+    buf.len = len;
+  }
+  
+  return &buf;  
 }
 
 static void ngx_http_eb_client_body_handler(ngx_http_request_t *r) {
