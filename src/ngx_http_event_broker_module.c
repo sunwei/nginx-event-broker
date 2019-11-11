@@ -6,7 +6,7 @@
 #define MODULE_NAME "ngx_event_broker"
 #define MAX_DEQ_TRY 1000
 #define MAX_SIZE_DIGIT_TRNFM 128
-#define ABQUEUE_DATA_FILE "/tmp/ngx_event_broker_store_data.txt"
+#define EB_DATA_FILE "/tmp/ngx_event_broker_store_data.txt"
 #define SPLIT_DELIM "_@_"
 
 typedef struct {
@@ -459,7 +459,7 @@ static ngx_int_t ngx_http_event_broker_module_init(ngx_cycle_t *cycle) {
   
 }
 
-static void ngx_http_event_broker_module_exit(ngx_cycle_t){
+static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle){
   ngx_http_conf_ctx_t *ctx;
   ngx_http_event_broker_main_conf_t *mcf;
   ngx_str_t *delim_event_key, *delim_topic_key;
@@ -480,8 +480,8 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t){
   
   mcf = ctx->main_conf[ngx_http_event_broker_module.ctx_index];
   if(mcf->topics->nelts > 0){
-    delim_event_key = get_delim_event_key();
-    delim_topic_key = get_delim_topic_key();
+    delim_event_key = get_delim_event_key(cycle);
+    delim_topic_key = get_delim_topic_key(cycle);
     
     f_topic = mcf->topics->elts;
     for(i = 0; i < mcf->topics->nelts; i++){
@@ -504,18 +504,50 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t){
     
     if(data_store->nelts > 0){
       ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "event broker backup size %O bytes", data_store->nelts);
-      backup_data_store(data_store);
+      if(NGX_OK == backup_data_store(data_store)){
+        ngx_log_error(NGX_LOG_INFO, cycle->log, 0, "Data has been successfully saved to %s", local_file_path);
+        return;
+      } else {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Error while storing backup data file, unable to write to file");
+      }
+    } else {
+      ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "No data to backup");
     }
-    
+  } else {
+    ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "No topic found to backup");
   }
   
 }
 
-void backup_data_store(ngx_array_t *data_store){
-  //TODO
+ngx_int_t backup_data_store(ngx_array_t *data_store, ngx_cycle_t *cycle){
+  u_char *local_file_path;
+  FILE *local_file;
+  
+  local_file_path = (u_char *)ngx_palloc(cycle->pool, sizeof(EB_DATA_FILE));
+  ngx_copy(local_file_path, EB_DATA_FILE, sizeof(EB_DATA_FILE));
+  
+  local_file = fopen((char *)local_file_path, "w");
+  if(NULL != local_file){
+    ngx_str_t encoded_data, plain_data;
+    
+    plain_data.data = (u_char *)data_store->elts;
+    plain_data.len = data_store->nelts;
+    
+    ngx_unit_t encoded_len = ngx_base64_encoded_length(plain_data.len);
+    encoded_data.data = (u_char *)ngx_pcalloc(cycle->pool, encoded_len);
+    encoded_data.len = encoded_len;
+    
+    ngx_encode_base64(&encoded_data, &plain_data);
+    
+    if(fwrite(encoded_data.data, encoded_data.len, 1, local_file) == 1){
+      return NGX_OK;
+    }
+  }
+  
+  return NGX_ERROR;
 }
 
-ngx_str_t* get_delim_event_key(void){
+ngx_str_t* get_delim_event_key(ngx_cycle_t *cycle){
   ngx_str_t delim_event_key;
   
   delim_event_key.len = sizeof(SPLIT_DELIM) + 2;
@@ -526,7 +558,7 @@ ngx_str_t* get_delim_event_key(void){
   return &delim_event_key;
 }
 
-ngx_str_t* get_delim_topic_key(void){
+ngx_str_t* get_delim_topic_key(ngx_cycle_t *cycle){
   ngx_str_t delim_topic_key;
   
   delim_topic_key.len = sizeof(SPLIT_DELIM) + 2;
