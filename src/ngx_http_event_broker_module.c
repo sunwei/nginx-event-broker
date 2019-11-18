@@ -11,8 +11,8 @@
 
 typedef struct {
   ngx_str_t   topic;
+  abqueue_t   event_q;
   ngx_array_t *subscriber_urls;
-  abqueue_t event_q;
 } ngx_http_event_broker_topic_ctx_t;
 
 typedef struct {
@@ -55,6 +55,13 @@ typedef struct {
   abqueue_t *targeted_topic_q;
 } ngx_http_event_broker_ctx_t;
 
+static inline void* ngx_eb_alloc(void *pl, size_t sz) {
+  return ngx_slab_alloc( ((ngx_http_event_broker_shm_t*)pl)->shpool, sz);
+}
+
+static inline void ngx_eb_free(void *pl, void *ptr) {
+  ngx_slab_free( ((ngx_http_event_broker_shm_t*)pl)->shpool, ptr);
+}
 
 static ngx_command_t ngx_http_event_broker_commands[] = {
   {
@@ -443,7 +450,7 @@ static ngx_int_t ngx_http_event_broker_module_init(ngx_cycle_t *cycle) {
     if (node) {
       topic_q = node->topic_ctx->event_q;
       if(NULL != topic_q){
-        topic_q.mpl = mcf->shared_ctx->shared_mem;
+        topic_q.mpl = mcf->shm_ctx->shared_mem;
         queue_initialized = 1;
       } else {
         break;
@@ -452,11 +459,59 @@ static ngx_int_t ngx_http_event_broker_module_init(ngx_cycle_t *cycle) {
   }
   
   if(0 == queue_initialized){
+    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " Initializing event broker queues");
+    if(NGX_OK == restore_topic_ctx(mcf, cycle)){
+      restore_events(); //todo
+    } else {
+      return NGX_ERROR;
+    }
   }
   
   ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " event broker has been initialized");
   return NGX_OK;
   
+}
+
+ngx_int_t restore_topic_ctx(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cycle){
+  ngx_uint_t i;
+  ngx_str_t *topic;
+  ngx_http_event_broker_node_t *node;
+  ngx_http_event_broker_topic_ctx_t *topic_ctx;
+  
+  topic_ctx = ngx_slab_calloc(mcf->shm_ctx->shared_mem->shpool, mcf->topics->nelts * sizeof(ngx_http_event_broker_topic_ctx_t));
+  if(NULL == topic_ctx){
+    ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, " share memory allocation topic_ctx error ");
+    return NGX_ERROR;
+  }
+  
+  for(i = 0, i < mcf->topics->nelts; i++){
+    topic = mcf->topics->elts + i;
+    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " Topic name \"%V\"\n", topic);
+    
+    node = (ngx_http_event_broker_node_t *)ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_http_event_broker_node_t));
+    if(NULL == node){
+      ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, " share memory allocation error for http event broker node");
+      return NGX_ERROR;
+    }
+    
+    if(-1 == abqueue_init(&topic_ctx[i].event_q, mcf->shm_ctx->shared_mem, ngx_eb_alloc, ngx_eb_free)){
+      ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, " abqueue initializing error... ");
+      return NGX_ERROR;
+    }
+    
+    topic_ctx[i].topic.len = topic->len;
+    topic_ctx[i].topic.data = (u_char*)ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(u_char) * (topic_ctx[i].topic.len + 1));
+    ngx_memcpy(topic_ctx[i].topic.data, topic->data, topic_ctx[i].topic.len);
+    topic_ctx[i].topic.data[topic_ctx[i].topic.len] = 0;
+    
+    uint32_t hash = ngx_crc32_long(topic_ctx[i].topic.data, topic_ctx[i].topic.len);
+    node->sn.node.key = hash;
+    node->topic_ctx = topic_ctx[i];
+    
+    ngx_rbtree_insert(&mcf->shm_ctx->shared_mem->rbtree, &node->sn.node);
+  }
+  
+  return NGX_OK;
 }
 
 static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle){
@@ -505,7 +560,6 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle){
     if(data_store->nelts > 0){
       ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "event broker backup size %O bytes", data_store->nelts);
       if(NGX_OK == backup_data_store(data_store)){
-        ngx_log_error(NGX_LOG_INFO, cycle->log, 0, "Data has been successfully saved to %s", local_file_path);
         return;
       } else {
         ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Error while storing backup data file, unable to write to file");
@@ -540,6 +594,7 @@ ngx_int_t backup_data_store(ngx_array_t *data_store, ngx_cycle_t *cycle){
     ngx_encode_base64(&encoded_data, &plain_data);
     
     if(fwrite(encoded_data.data, encoded_data.len, 1, local_file) == 1){
+      ngx_log_error(NGX_LOG_INFO, cycle->log, 0, "Data has been successfully saved to %s", local_file_path);
       return NGX_OK;
     }
   }
@@ -584,7 +639,7 @@ void check_nginx_aio(void){
 
 ngx_http_event_broker_node_t* node_lookup(ngx_http_event_broker_main_conf_t *mcf, ngx_str_t *s){
   uint32_t hash = ngx_crc32_long(s->data, s->len);
-  ngx_http_event_broker_shm_t *shm = mcf->shared_ctx->shared_mem;
+  ngx_http_event_broker_shm_t *shm = mcf->shm_ctx->shared_mem;
   ngx_http_event_broker_node_t *node;
   
   node = (ngx_http_event_broker_node_t *)ngx_str_rbtree_lookup(&shm->rbtree, s, hash);
