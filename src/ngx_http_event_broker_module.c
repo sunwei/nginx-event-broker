@@ -461,15 +461,18 @@ static ngx_int_t ngx_http_event_broker_module_init(ngx_cycle_t *cycle) {
   if(0 == queue_initialized){
     ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " Initializing event broker queues");
     if(NGX_OK == restore_topic_ctx(mcf, cycle)){
-      restore_events(mcf, cycle); //todo
+      if(NGX_OK == restore_events(mcf, cycle)){
+        ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " event broker has been restored");
+      } else {
+        return NGX_ERROR;
+      }
     } else {
       return NGX_ERROR;
     }
   }
   
   ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " event broker has been initialized");
-  return NGX_OK;
-  
+  return NGX_OK; 
 }
 
 ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cycle){
