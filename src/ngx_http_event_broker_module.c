@@ -461,7 +461,7 @@ static ngx_int_t ngx_http_event_broker_module_init(ngx_cycle_t *cycle) {
   if(0 == queue_initialized){
     ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " Initializing event broker queues");
     if(NGX_OK == restore_topic_ctx(mcf, cycle)){
-      restore_events(); //todo
+      restore_events(mcf, cycle); //todo
     } else {
       return NGX_ERROR;
     }
@@ -470,6 +470,130 @@ static ngx_int_t ngx_http_event_broker_module_init(ngx_cycle_t *cycle) {
   ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " event broker has been initialized");
   return NGX_OK;
   
+}
+
+ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cycle){
+  u_char *local_file_path, *file_content, *pflip, *pend, *p_tmp;
+  ngx_fd_t        read_fd;
+  ngx_file_info_t fi;
+  off_t           store_sz;
+  ngx_uint_t      decode_len;
+  ngx_str_t       plain_data, encoded_data;
+  ngx_str_t       *delim_event_key, *delim_topic_key, *topic, *event;
+  ngx_array_t     *topic_arr;
+  uintptr_t       *topic_p;
+  ngx_uint_t      i, j;
+  uint32_t        hash;
+  ngx_http_event_broker_node_t *node;
+  abqueue_t       *event_q;
+  
+  local_file_path = (u_char *)ngx_palloc(cycle->pool, sizeof(EB_DATA_FILE));
+  ngx_copy(local_file_path, EB_DATA_FILE, sizeof(EB_DATA_FILE));
+  
+  read_fd = ngx_open_file(local_file_path, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+  if(NGX_INVALID_FILE != read_fd){
+    if(NGX_FILE_ERROR != ngx_fd_info(read_fd, &fi)){
+      if((store_sz = ngx_file_size(&fi))){
+        ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " restore events read file size %O bytes ", store_sz);
+        
+        file_content = (u_char*) ngx_pcalloc(cycle->pool, store_sz);
+        if(read(read_fd, file_content, store_sz) == -1) {
+          ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "read local backup file \"%s\" failed", local_file_path);
+          return NGX_ERROR;
+        } else if(NGX_FILE_ERROR == ngx_close_file(read_fd) || NGX_FILE_ERROR == ngx_delete_file(local_file_path)){
+          ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "unable to close / remove local data file %s", local_file_path);
+        }
+        
+        ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "restoring... ");
+        encoded_data.len = store_sz;
+        encoded_data.data = file_content;
+        decode_len = ngx_base64_decoded_length(store_sz);
+        plain_data.len = decode_len;
+        plain_data.data = (u_char *)ngx_pcalloc(cycle->pool, decode_len);
+        ngx_decode_base64(&plain_data, &encoded_data);
+        
+        pflip = plain_data.data;
+        pend = pflip + plain_data.len;
+        
+        delim_event_key = get_delim_event_key(cycle);
+        delim_topic_key = get_delim_topic_key(cycle);
+        
+        topic_arr = ngx_array_create(cycle->pool, 128, sizeof(uintptr_t));
+        p_tmp = pflip;
+        while ((p_tmp = get_if_contain(p_tmp, pend, delim_topic_key.data, delim_topic_key.len))) {
+          topic_p = ngx_array_push(topic_arr);
+          p_tmp = p_tmp + delim_topic_key.len;
+          *topic_p = (uintptr_t)(u_char*)p_tmp;
+        }
+        
+        topic_p = (uintptr_t*)topic_arr->elts;
+        for(i=0, i<topic_arr->nelts, i++){
+          pflip = (u_char*)topic_arr[i];
+          if((i + 1) == topic_arr->nelts){
+            pend = plain_data.data + plain_data.len;
+          } else {
+            pend = (u_char*)topic_arr[i + 1];
+            pend -= delim_topic_key.len;
+          }
+          
+          for(j=0; j < mcf->topics->nelts; j++){
+            if((p_tmp = get_if_contain(pflip, pend, delim_event_key.data, delim_event_key.len))){
+              topic = mcf->topics->elts + j;
+              
+              if(topic->len == (size_t)(p_tmp - pflip) && ngx_strncmp(topic->data, pflip, (p_tmp - pflip)) == 0) {
+                hash = ngx_crc32_long(topic->data, topic->len);
+                node = (ngx_http_event_broker_node_t *)ngx_str_rbtree_lookup(&mcf->shm_ctx->shared_mem->rbtree, topic, hash);
+                if(node){
+                  event_q = &node->topic_ctx->event_q;
+                  if(NULL != event_q){
+                    pflip = p_tmp + delim_event_key.len;
+                    
+                    while((p_tmp = get_if_contain(pflip, pend, delim_event_key.data, delim_event_key.len))){
+                      event = ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_str_t) + (p_tmp - pflip));
+                      if(NULL == event){
+                        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, " not enough share memory given for event message");
+                        return NGX_ERROR;
+                      }
+                      
+                      event->data = ((u_char*)topic) + sizeof(ngx_str_t);
+                      event->len = p_tmp - pflip;
+                      ngx_memcpy(event->data, pflip, event->len);
+                      
+                      abqueue_enq(event_q, event);
+                      pflip = p_tmp + delim_event_key.len;
+                    }
+                    
+                    event = ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_str_t) + (pend - pflip));
+                    if(NULL == event){
+                      ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, " not enough share memory given for event message");
+                      return NGX_ERROR;
+                    }
+                    
+                    event->data = ((u_char*)topic) + sizeof(ngx_str_t);
+                    event->len = p_end - pflip;
+                    ngx_memcpy(event->data, pflip, event->len);
+                    
+                    abqueue_enq(event_q, event);
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+        ngx_pfree(cycle->pool, delim_topic_key.data);
+        ngx_pfree(cycle->pool, delim_event_key.data);
+        ngx_pfree(cycle->pool, file_content);
+        ngx_pfree(cycle->pool, plain_data.data);
+        ngx_array_destory(topic_arr);
+        
+        ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " backup data %s has been restored ", local_file_path);
+      }
+    }
+  }
+  
+  ngx_pfree(cycle->pool, local_file_path);
+  return NGX_OK;
 }
 
 ngx_int_t restore_topic_ctx(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cycle){
@@ -645,4 +769,15 @@ ngx_http_event_broker_node_t* node_lookup(ngx_http_event_broker_main_conf_t *mcf
   node = (ngx_http_event_broker_node_t *)ngx_str_rbtree_lookup(&shm->rbtree, s, hash);
   
   return node;
+}
+
+static u_char* get_if_contain(u_char *start, u_char *end, u_char *delim_s, size_t delim_len){
+  u_char *result;
+  while ((result = ngx_strlchr(start, end, *delim_s))){
+    if(ngx_strncmp(result, delim_s, delim_len) == 0){
+      return result;
+    }
+    start = ++result;
+  }
+  return NULL;
 }
