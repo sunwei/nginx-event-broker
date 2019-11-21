@@ -72,7 +72,7 @@ static ngx_command_t ngx_http_event_broker_commands[] = {
   {
     ngx_string("ngx_event_broker_memory_allocate"),
     NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
-    ngx_http_event_broker_set_shm_size_cmd,
+    ngx_http_eb_set_shm_size_cmd,
     NGX_HTTP_MAIN_CONF_OFFSET,
     0,
     NULL
@@ -88,23 +88,8 @@ static ngx_command_t ngx_http_event_broker_commands[] = {
   {
     ngx_string("ngx_event_broker_publish"),
     NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
-    ngx_http_event_broker_publish_cmd,
+    ngx_http_eb_publish_cmd,
     NGX_HTTP_LOC_CONF_OFFSET,
-    0,
-    NULL
-  },
-  {
-    ngx_string("ngx_event_broker_subscribe"),
-    NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
-    ngx_http_event_broker_subscribe_cmd,
-    NGX_HTTP_LOC_CONF_OFFSET,
-    0,
-    NULL
-  },
-  {  ngx_string("ngx_event_broker_store"),
-    NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE12,
-    ngx_http_event_broker_store_cmd,
-    NGX_HTTP_MAIN_CONF_OFFSET,
     0,
     NULL
   },
@@ -139,6 +124,22 @@ ngx_module_t ngx_http_event_broker_module = {
   ngx_http_event_broker_module_exit, /* exit master */
   NGX_MODULE_V1_PADDING
 };
+
+static void *ngx_http_eb_create_loc_conf(ngx_conf_t *cf) {
+  ngx_http_event_broker_loc_conf_t  *conf;
+  
+  conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_event_broker_loc_conf_t));
+  if (conf == NULL) {
+    return NULL;
+  }
+  ngx_memzero(&conf->target_topic$, sizeof(ngx_http_complex_value_t));
+  
+  return conf;
+} 
+
+static char *ngx_http_eb_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child) {
+  return NGX_CONF_OK;
+}
 
 static void * ngx_http_eb_create_main_conf(ngx_conf_t *cf) {
   ngx_http_event_broker_main_conf_t *mcf;
@@ -212,7 +213,7 @@ static ngx_int_t ngx_http_eb_post_conf(ngx_conf_t *cf) {
       ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "event broker, %s", "Unable to allocate memory with specified size");
       return NGX_ERROR;
     }
-    shm_zone->init = ngx_http_event_broker_shm_init;
+    shm_zone->init = ngx_http_eb_shm_init;
     shm_zone->data = mcf->shm_ctx;
   }
   
@@ -377,6 +378,37 @@ static ngx_int_t ngx_http_eb_precontent_handler(ngx_http_request_t *r) {
   return NGX_DONE;
 }
 
+void get_message_from_payload(ngx_http_event_broker_msg_t *message, ngx_str_t *payload){
+  message->data = ((u_char*)message) + sizeof(ngx_http_event_broker_msg_t);
+  message->len = payload->len;
+  ngx_memcpy(message->data, payload->data, payload->len);
+}
+
+static void ngx_http_eb_process_t_handler(void *data, ngx_log_t *log){
+  ngx_http_event_broker_ctx_t *ctx
+  ngx_http_request_t *r = data;
+  
+  ctx = ngx_http_get_module_ctx(r, ngx_http_event_broker_module);
+  
+  ngx_http_eb_process(r, ctx);
+}
+
+static void ngx_http_eb_after_t_handler(ngx_event_t *ev) {
+  ngx_connection_t    *c;
+  ngx_http_request_t  *r;
+  
+  r = ev->data;
+  c = r->connection;
+  
+  ngx_http_set_log_request(c->log, r);
+  
+  r->main->blocked--;
+  r->aio = 0;
+  
+  r->write_event_handler(r);
+  ngx_http_run_posted_requests(c);
+}
+
 static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx_t *ctx){
   ngx_http_event_broker_msg_t *message;
   ngx_str_t *payload = &ctx->payload;
@@ -391,9 +423,7 @@ static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx
       return;
     }
     
-    message->data = ((u_char*)message) + sizeof(ngx_http_event_broker_msg_t);
-    message->len = payload->len;
-    ngx_memcpy(message->data, payload->data, payload.len);
+    get_message_from_payload(message, payload);
     
     payload->len = 0;
     ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, " %s", "enqueueing" );
@@ -881,4 +911,98 @@ static u_char* get_if_contain(u_char *start, u_char *end, u_char *delim_s, size_
     start = ++result;
   }
   return NULL;
+}
+
+ngx_int_t ngx_http_eb_shm_init(ngx_shm_zone_t *shm_zone, void *data) {
+  size_t                    len;
+  ngx_http_event_broker_shm_ctx_t *oshm = data;
+  ngx_http_event_broker_shm_ctx_t *nshm = shm_zone->data;
+  ngx_slab_pool_t *shpool;
+  
+  if (oshm) {
+    nshm->name = oshm->name;
+    nshm->shared_mem = oshm->shared_mem;
+    return NGX_OK;
+  }
+  
+  shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
+  
+  if (shm_zone->shm.exists) {
+    shm_zone->data = shpool->data;
+    return NGX_OK;
+  }
+  
+  nshm->shared_mem = ngx_slab_alloc(shpool, sizeof(ngx_http_event_broker_shm_t));
+  ngx_rbtree_init(&nshm->shared_mem->rbtree, &nshm->shared_mem->sentinel, ngx_str_rbtree_insert_value);
+  
+  nshm->shared_mem->shpool = shpool;
+  
+  len = sizeof(" in nginx event broker session shared cache \"\"") + shm_zone->shm.name.len;
+  
+  nshm->shared_mem->shpool->log_ctx = ngx_slab_alloc(nshm->shared_mem->shpool, len);
+  if (nshm->shared_mem->shpool->log_ctx == NULL) {
+    return NGX_ERROR;
+  }
+  
+  ngx_sprintf(nshm->shared_mem->shpool->log_ctx, " nginx event broker session shared cache \"%V\"%Z",
+              &shm_zone->shm.name);
+  
+  nshm->shared_mem->shpool->log_nomem = 0;
+  
+  return NGX_OK;
+}
+
+/* Commands */
+
+static char* ngx_http_eb_set_shm_size_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
+  ngx_http_event_broker_main_conf_t *mcf = conf;
+  ngx_str_t                         *values;
+  ngx_shm_zone_t                    *shm_zone;
+  ngx_int_t                         pg_size;
+  
+  values = cf->args->elts;
+  pg_size = ngx_parse_size(&values[1]);
+  
+  if (pg_size == NGX_ERROR) {
+    ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "Event Broker, %s", "Invalid cache size, please specify like 1m, 100M or etc.");
+    return NGX_CONF_ERROR;
+  }
+  
+  shm_zone = ngx_shared_memory_add(cf, &mcf->shm_ctx->name, pg_size, &ngx_http_event_broker_module);
+  if (shm_zone == NULL) {
+    ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "Event Broker, %s", "Unable to allocate apps defined size");
+    return NGX_CONF_ERROR;
+  }
+  shm_zone->init = ngx_http_eb_shm_init;
+  shm_zone->data = mcf->shm_ctx;
+  
+  return NGX_CONF_OK;
+}
+
+static char* ngx_http_eb_publish_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
+  ngx_http_event_broker_loc_conf_t  *lflcf = conf;
+  ngx_http_compile_complex_value_t  ccv;
+  ngx_str_t                         *value;
+  
+  if (lflcf->target_topic$.value.len != 0) {
+    return "one topic for one location";
+  }
+  
+  value = cf->args->elts;
+  if (value[1].len == 0) {
+    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "Event Broker, %s", "no topic name given ");
+    return NGX_CONF_ERROR;
+  }
+  
+  ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
+  
+  ccv.cf = cf;
+  ccv.value = &value[1];
+  ccv.complex_value = &lflcf->target_topic$;
+  
+  if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
+    return NGX_CONF_ERROR;
+  }
+  
+  return NGX_CONF_OK;
 }
