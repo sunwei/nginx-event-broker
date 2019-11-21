@@ -10,6 +10,11 @@
 #define SPLIT_DELIM "_@_"
 
 typedef struct {
+  u_char *data;
+  size_t len;
+} ngx_http_event_broker_msg_t;
+
+typedef struct {
   ngx_str_t   topic;
   abqueue_t   event_q;
   ngx_array_t *subscriber_urls;
@@ -187,7 +192,7 @@ static ngx_int_t ngx_http_eb_post_conf(ngx_conf_t *cf) {
     }
     *handler = ngx_http_eb_rewrite_handler;
     
-#if (nginx_version > 1013003)
+#if (nginx_version > 1013003) //TODO, only support 17.3 above
     ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0, "event broker, %s", "USING NGX_HTTP_PRECONTENT_PHASE");
     handler = ngx_array_push(&core_main_conf->phases[NGX_HTTP_PRECONTENT_PHASE].handlers);
 #else
@@ -264,7 +269,7 @@ static ngx_int_t ngx_http_eb_rewrite_handler(ngx_http_request_t *r) {
 
     req_conf = ngx_http_read_client_request_body(r, ngx_http_eb_client_body_handler);
 
-    //todo 
+    //TODO only support 17.3 above 
     if (req_conf == NGX_ERROR || req_conf >= NGX_HTTP_SPECIAL_RESPONSE) {
 #if (nginx_version < 1002006) || (nginx_version >= 1003000 && nginx_version < 1003009)
       r->main->count--;
@@ -320,7 +325,6 @@ static ngx_int_t ngx_http_eb_precontent_handler(ngx_http_request_t *r) {
 
   if (ctx->req_conf != NGX_CONF_UNSET) {
     ngx_http_eb_output_filter(r);
-    // TODO
     return NGX_DONE;
   }
 
@@ -371,6 +375,100 @@ static ngx_int_t ngx_http_eb_precontent_handler(ngx_http_request_t *r) {
   }
 
   return NGX_DONE;
+}
+
+static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx_t *ctx){
+  ngx_http_event_broker_msg_t *message;
+  ngx_str_t *payload = &ctx->payload;
+  ngx_uint_t i;
+  u_char *res_msg;
+  
+  if (r->method & (NGX_HTTP_POST | NGX_HTTP_PUT | NGX_HTTP_PATCH)) {
+    message = ngx_slab_alloc(ctx->shared_mem->shpool, sizeof(ngx_str_t) + payload->len);
+    if(NULL == message){
+      ngx_log_error(NGX_LOG_EMERG, r->connection->log, 0, " No enough share memory for message");
+      ctx->rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
+      return;
+    }
+    
+    message->data = ((u_char*)message) + sizeof(ngx_http_event_broker_msg_t);
+    message->len = payload->len;
+    ngx_memcpy(message->data, payload->data, payload.len);
+    
+    payload->len = 0;
+    ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, " %s", "enqueueing" );
+    abqueue_enq(ctx->targeted_topic_q, message);
+    ctx->rc = NGX_HTTP_ACCEPTED;
+  } else {
+    ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, " %s", "dequeueing in every 10 sec");
+    for(i=0; i < MAX_DEQ_TRY; i++){
+      if((message = abqueue_dep(ctx->targeted_topic_q))){
+        if(message->len){
+          res_msg = ngx_palloc(r->pool, message->len);
+          ngx_memcpy(res_msg, message->data, message->len);
+          ctx.response.data = rs;
+          ctx.response.len = message->len;
+          ngx_slab_free(ctx->shared_mem->shpool, message);
+          ctx->rc = NGX_HTTP_OK;
+        }
+      } else {
+        ngx_msleep(10);
+      }
+    }
+    ctx->rc = NGX_HTTP_NO_CONTENT;
+    return;
+  }
+}
+
+static void ngx_http_eb_output_filter(ngx_http_request_t *r) {
+  ngx_http_event_broker_ctx_t *ctx;
+  ngx_str_t *response;
+  size_t resp_len;
+  ngx_int_t rc;
+  ngx_buf_t *buf;
+  ngx_chain_t output;
+  
+  ctx = ngx_http_get_module_ctx(r, ngx_http_event_broker_module);
+  if(NULL == ctx){
+    ngx_log_error(NGX_LOG_EMERG, r->connection->log, 0, "Session invalid");
+    ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+    return;
+  }
+  
+  if(ctx->rc == NGX_HTTP_INTERNAL_SERVER_ERROR){
+    ngx_log_error(NGX_LOG_EMERG, r->connection->log, 0, "Server error");
+    ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+    return;
+  }
+  
+  response = &ctx->response;
+  r->headers_out.status = ctx->rc;
+  r->headers_out.content_type.len = sizeof("text/plain") - 1;
+  r->headers_out.content_type.data = (u_char *)"text/plain"
+  
+  if((resp_len = response->len)){
+    r->headers_out.content_length_n = resp_len;
+    rc = ngx_http_send_header(r);
+    if(rc == NGX_ERROR){
+      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "response processing failed.");
+      rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
+      ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+      return;
+    }
+    
+    buf = ngx_create_temp_buf(r->pool, resp_len);
+    buf->last = ngx_copy(buf->last, response->data, resp_len);
+    buf->memory = 1; /*read only*/
+    buf->last_buf = 1;
+    
+    output.buf = buf;
+    out.next = NULL;
+    ngx_http_finalize_request(r, ngx_http_output_filter(r, &out));
+  } else {
+    r->headers_out.content_length_n = 0;
+    r->header_only = 1;
+    ngx_http_finalize_request(r, ngx_http_send_header(r));
+  }
 }
 
 ngx_str_t* get_request_body(ngx_http_request_t *r){
