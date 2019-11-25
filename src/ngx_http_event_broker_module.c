@@ -60,6 +60,38 @@ typedef struct {
   abqueue_t *targeted_topic_q;
 } ngx_http_event_broker_ctx_t;
 
+static void *ngx_http_eb_create_loc_conf(ngx_conf_t *cf);
+static char *ngx_http_eb_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
+static void * ngx_http_eb_create_main_conf(ngx_conf_t *cf);
+static char * ngx_http_eb_init_main_conf(ngx_conf_t *cf, void *conf);
+static ngx_int_t ngx_http_eb_pre_conf(ngx_conf_t *cf);
+static ngx_int_t ngx_http_eb_post_conf(ngx_conf_t *cf);
+static ngx_int_t ngx_http_eb_rewrite_handler(ngx_http_request_t *r);
+void init_eb_context(ngx_http_event_broker_ctx_t *ctx, ngx_http_request_t *r, abqueue_t *targeted_q, ngx_str_t *target_topic);
+static ngx_int_t ngx_http_eb_precontent_handler(ngx_http_request_t *r);
+void get_message_from_payload(ngx_http_event_broker_msg_t *message, ngx_str_t *payload);
+static void ngx_http_eb_process_t_handler(void *data, ngx_log_t *log);
+static void ngx_http_eb_after_t_handler(ngx_event_t *ev);
+static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx_t *ctx);
+static void ngx_http_eb_output_filter(ngx_http_request_t *r);
+ngx_str_t* get_request_body(ngx_http_request_t *r);
+static void ngx_http_eb_client_body_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_event_broker_module_init(ngx_cycle_t *cycle);
+ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cycle);
+ngx_int_t restore_topic_ctx(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cycle);
+static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle);
+ngx_int_t backup_data_store(ngx_array_t *data_store, ngx_cycle_t *cycle);
+ngx_str_t* get_delim_event_key(ngx_cycle_t *cycle);
+ngx_str_t* get_delim_topic_key(ngx_cycle_t *cycle);
+void check_worker_processes(ngx_core_conf_t *ccf);
+void check_nginx_aio(void);
+ngx_http_event_broker_node_t* node_lookup(ngx_http_event_broker_main_conf_t *mcf, ngx_str_t *s);
+static u_char* get_if_contain(u_char *start, u_char *end, u_char *delim_s, size_t delim_len);
+ngx_int_t ngx_http_eb_shm_init(ngx_shm_zone_t *shm_zone, void *data);
+static char* ngx_http_eb_set_shm_size_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static char* ngx_http_eb_publish_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+
+
 static inline void* ngx_eb_alloc(void *pl, size_t sz) {
   return ngx_slab_alloc( ((ngx_http_event_broker_shm_t*)pl)->shpool, sz);
 }
