@@ -70,8 +70,10 @@ static ngx_int_t ngx_http_eb_rewrite_handler(ngx_http_request_t *r);
 void init_eb_context(ngx_http_event_broker_ctx_t *ctx, ngx_http_request_t *r, abqueue_t *targeted_q, ngx_str_t *target_topic);
 static ngx_int_t ngx_http_eb_precontent_handler(ngx_http_request_t *r);
 void get_message_from_payload(ngx_http_event_broker_msg_t *message, ngx_str_t *payload);
+#if (NGX_THREADS)
 static void ngx_http_eb_process_t_handler(void *data, ngx_log_t *log);
 static void ngx_http_eb_after_t_handler(ngx_event_t *ev);
+#endif
 static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx_t *ctx);
 static void ngx_http_eb_output_filter(ngx_http_request_t *r);
 ngx_str_t* get_request_body(ngx_http_request_t *r);
@@ -83,7 +85,7 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle);
 ngx_int_t backup_data_store(ngx_array_t *data_store, ngx_cycle_t *cycle);
 ngx_str_t* get_delim_event_key(ngx_cycle_t *cycle);
 ngx_str_t* get_delim_topic_key(ngx_cycle_t *cycle);
-void check_worker_processes(ngx_core_conf_t *ccf);
+void check_worker_processes(ngx_core_conf_t *ccf, ngx_cycle_t *cycle);
 void check_nginx_aio(void);
 ngx_http_event_broker_node_t* node_lookup(ngx_http_event_broker_main_conf_t *mcf, ngx_str_t *s);
 static u_char* get_if_contain(u_char *start, u_char *end, u_char *delim_s, size_t delim_len);
@@ -214,7 +216,6 @@ static ngx_int_t ngx_http_eb_post_conf(ngx_conf_t *cf) {
   
   if (mcf != NULL ) {
     ngx_http_handler_pt        *handler;
-    ngx_str_t                  default_size;
     ngx_shm_zone_t             *shm_zone;
     ngx_http_core_main_conf_t  *core_main_conf;
     core_main_conf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
@@ -239,7 +240,7 @@ static ngx_int_t ngx_http_eb_post_conf(ngx_conf_t *cf) {
     *handler = ngx_http_eb_precontent_handler;
     
     ngx_conf_log_error(NGX_LOG_DEBUG, cf,   0, "event broker, %s", "Init Default Share memory with 10mb");
-    default_size = ngx_string("10M");
+    ngx_str_t default_size = ngx_string("10M");
     shm_zone = ngx_shared_memory_add(cf, &mcf->shm_ctx->shm_zone_name, ngx_parse_size(&default_size), &ngx_http_event_broker_module);
     if(NULL == shm_zone){
       ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "event broker, %s", "Unable to allocate memory with specified size");
@@ -271,9 +272,9 @@ static ngx_int_t ngx_http_eb_rewrite_handler(ngx_http_request_t *r) {
   if (target_topic.len == 0) {
     ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "%s", " No target found ");
   } else {
-    ngx_http_event_broker_node_t *node = node_lookup(mcf, target_topic);
+    ngx_http_event_broker_node_t *node = node_lookup(mcf, &target_topic);
     if(node){
-      targeted_q = node->topic_ctx->event_q;
+      targeted_q = &node->topic_ctx->event_q;
     }
   }
 
@@ -342,8 +343,6 @@ void init_eb_context(ngx_http_event_broker_ctx_t *ctx, ngx_http_request_t *r, ab
 static ngx_int_t ngx_http_eb_precontent_handler(ngx_http_request_t *r) {
   ngx_http_event_broker_main_conf_t *mcf;
   ngx_http_event_broker_ctx_t       *ctx;
-  ngx_thread_pool_t                 *tp;
-  ngx_http_core_loc_conf_t          *clcf;
 
   mcf = ngx_http_get_module_main_conf(r, ngx_http_event_broker_module);
   ctx = ngx_http_get_module_ctx(r, ngx_http_event_broker_module);
@@ -370,7 +369,7 @@ static ngx_int_t ngx_http_eb_precontent_handler(ngx_http_request_t *r) {
     body = get_request_body(r);
 
     if (body) {
-      ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "request_content=%*s \n", len, body);
+      ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "request_content=%*s \n", body->len, body);
       ctx->payload.data = body->data;
       ctx->payload.len = body->len;
     } else {
@@ -383,15 +382,17 @@ static ngx_int_t ngx_http_eb_precontent_handler(ngx_http_request_t *r) {
     }
   }
 
+#if(NGX_THREADS)
+  ngx_thread_pool_t                 *tp;
+  ngx_http_core_loc_conf_t          *clcf;
+    
   clcf  = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
   tp = clcf->thread_pool;
 
   if (tp == NULL) {
     ngx_log_error(NGX_LOG_WARN, r->connection->log, 0, "processing with single thread, enable \"aio threads;\" in server/loc block for concurrent request");
-    ngx_http_eb_process(r, ctx);
-    ngx_http_eb_output_filter(r);
+    goto single_thread;
     
-    return NGX_DONE;
   } else {
     ngx_thread_task_t *task = ngx_thread_task_alloc(r->pool, sizeof(ngx_http_request_t));
     ngx_memcpy(task->ctx, r, sizeof(ngx_http_request_t));
@@ -406,7 +407,12 @@ static ngx_int_t ngx_http_eb_precontent_handler(ngx_http_request_t *r) {
     r->aio = 1;
     return NGX_DONE;
   }
+single_thread:
+#endif
 
+  ngx_http_eb_process(r, ctx);
+  ngx_http_eb_output_filter(r);
+      
   return NGX_DONE;
 }
 
@@ -416,8 +422,9 @@ void get_message_from_payload(ngx_http_event_broker_msg_t *message, ngx_str_t *p
   ngx_memcpy(message->data, payload->data, payload->len);
 }
 
+#if (NGX_THREADS)
 static void ngx_http_eb_process_t_handler(void *data, ngx_log_t *log){
-  ngx_http_event_broker_ctx_t *ctx
+  ngx_http_event_broker_ctx_t *ctx;
   ngx_http_request_t *r = data;
   
   ctx = ngx_http_get_module_ctx(r, ngx_http_event_broker_module);
@@ -440,6 +447,7 @@ static void ngx_http_eb_after_t_handler(ngx_event_t *ev) {
   r->write_event_handler(r);
   ngx_http_run_posted_requests(c);
 }
+#endif
 
 static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx_t *ctx){
   ngx_http_event_broker_msg_t *message;
@@ -451,7 +459,7 @@ static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx
     message = ngx_slab_alloc(ctx->shared_mem->shpool, sizeof(ngx_str_t) + payload->len);
     if(NULL == message){
       ngx_log_error(NGX_LOG_EMERG, r->connection->log, 0, " No enough share memory for message");
-      ctx->rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
+      ctx->req_conf = NGX_HTTP_INTERNAL_SERVER_ERROR;
       return;
     }
     
@@ -460,24 +468,24 @@ static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx
     payload->len = 0;
     ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, " %s", "enqueueing" );
     abqueue_enq(ctx->targeted_topic_q, message);
-    ctx->rc = NGX_HTTP_ACCEPTED;
+    ctx->req_conf = NGX_HTTP_ACCEPTED;
   } else {
     ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, " %s", "dequeueing in every 10 sec");
     for(i=0; i < MAX_DEQ_TRY; i++){
-      if((message = abqueue_dep(ctx->targeted_topic_q))){
+      if((message = abqueue_deq(ctx->targeted_topic_q))){
         if(message->len){
           res_msg = ngx_palloc(r->pool, message->len);
           ngx_memcpy(res_msg, message->data, message->len);
-          ctx.response.data = rs;
-          ctx.response.len = message->len;
+          ctx->response.data = res_msg;
+          ctx->response.len = message->len;
           ngx_slab_free(ctx->shared_mem->shpool, message);
-          ctx->rc = NGX_HTTP_OK;
+          ctx->req_conf = NGX_HTTP_OK;
         }
       } else {
         ngx_msleep(10);
       }
     }
-    ctx->rc = NGX_HTTP_NO_CONTENT;
+    ctx->req_conf = NGX_HTTP_NO_CONTENT;
     return;
   }
 }
@@ -497,16 +505,16 @@ static void ngx_http_eb_output_filter(ngx_http_request_t *r) {
     return;
   }
   
-  if(ctx->rc == NGX_HTTP_INTERNAL_SERVER_ERROR){
+  if(ctx->req_conf == NGX_HTTP_INTERNAL_SERVER_ERROR){
     ngx_log_error(NGX_LOG_EMERG, r->connection->log, 0, "Server error");
     ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
     return;
   }
   
   response = &ctx->response;
-  r->headers_out.status = ctx->rc;
+  r->headers_out.status = ctx->req_conf;
   r->headers_out.content_type.len = sizeof("text/plain") - 1;
-  r->headers_out.content_type.data = (u_char *)"text/plain"
+  r->headers_out.content_type.data = (u_char *)"text/plain";
   
   if((resp_len = response->len)){
     r->headers_out.content_length_n = resp_len;
@@ -524,8 +532,8 @@ static void ngx_http_eb_output_filter(ngx_http_request_t *r) {
     buf->last_buf = 1;
     
     output.buf = buf;
-    out.next = NULL;
-    ngx_http_finalize_request(r, ngx_http_output_filter(r, &out));
+    output.next = NULL;
+    ngx_http_finalize_request(r, ngx_http_output_filter(r, &output));
   } else {
     r->headers_out.content_length_n = 0;
     r->header_only = 1;
@@ -537,35 +545,51 @@ ngx_str_t* get_request_body(ngx_http_request_t *r){
   u_char         *body, *tmp_body = NULL;
   size_t         len;
   ngx_chain_t    *bufs;
-  ngx_str_t      buf = NULL;
+  ngx_buf_t      *buf;
+  ngx_str_t      *res_body;
   
   if(r->request_body != NULL && r->request_body->bufs != NULL) {
     len = 0;
     for(bufs=r->request_body->bufs; bufs; bufs=bufs->next){
       if(bufs->buf->in_file){
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "insufficient client_body_buffer_size");
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        return NULL;
       }
       len += bufs->buf->last - bufs->buf->pos;
     }
     if(len > 0){
       body = ngx_palloc(r->pool, len);
-      if(NULL != buf){
+      if(body){
         tmp_body = body;
         for(bufs=r->request_body->bufs; bufs; bufs=bufs->next){
           tmp_body = ngx_copy(tmp_body, bufs->buf->pos, bufs->buf->last - bufs->buf->pos);
         }
+      } else {
+        ngx_log_error(NGX_LOG_EMERG, r->connection->log, 0, "insufficient memory.");
+        return NULL;
       }
+    }
+  } else {
+    buf = r->request_body->bufs->buf;
+    if((len = ngx_buf_size(buf)) != 0){
+      body = ngx_palloc(r->pool, len);
+      ngx_memcpy(body, buf->pos, len);
+    } else {
+      return NULL;
     }
   }
   
-  buf = ngx_pcalloc(r->pool, sizeof(ngx_str_t));
-  if (buf != NULL) {
-    buf.data = body;
-    buf.len = len;
+  res_body = ngx_palloc(r->pool, sizeof(ngx_str_t));
+  if(NULL == res_body){
+    ngx_log_error(NGX_LOG_EMERG, r->connection->log, 0, "insufficient memory for request body");
+    return NULL;
   }
   
-  return &buf;  
+  res_body->len = len;
+  res_body->data = ngx_pcalloc(r->pool, len);
+  ngx_memcpy(res_body->data, body, len);
+  
+  return res_body;  
 }
 
 static void ngx_http_eb_client_body_handler(ngx_http_request_t *r) {
@@ -586,14 +610,14 @@ static ngx_int_t ngx_http_event_broker_module_init(ngx_cycle_t *cycle) {
   ngx_core_conf_t *ccf;
   ngx_http_event_broker_main_conf_t *mcf;
   ngx_http_conf_ctx_t *ctx;
-  ngx_http_event_broker_shm_t *shm;
-  ngx_str_t *topic_s;
+  ngx_str_t *topic_s, *qstr;
   ngx_http_event_broker_node_t *node;
   abqueue_t *topic_q;
   ngx_uint_t queue_initialized = 0;
+  ngx_uint_t i;
   
   ccf = (ngx_core_conf_t *)ngx_get_conf(cycle->conf_ctx, ngx_core_module);
-  check_worker_processes(ccf);
+  check_worker_processes(ccf, cycle);
   
   ctx = (ngx_http_conf_ctx_t *)ngx_get_conf(cycle->conf_ctx, ngx_http_module);
   mcf = ctx->main_conf[ngx_http_event_broker_module.ctx_index];
@@ -601,16 +625,17 @@ static ngx_int_t ngx_http_event_broker_module_init(ngx_cycle_t *cycle) {
     return NGX_OK;
   }
   
-  check_nginx_aio()
+  check_nginx_aio();
   
+  qstr = mcf->topics->elts;
   for (i = 0; i < mcf->topics->nelts; i++) {
-    topic_s = mcf->topics->elts + i;
+    topic_s = qstr + i;
     node = node_lookup(mcf, topic_s);
     
     if (node) {
-      topic_q = node->topic_ctx->event_q;
+      topic_q = &node->topic_ctx->event_q;
       if(NULL != topic_q){
-        topic_q.mpl = mcf->shm_ctx->shared_mem;
+        topic_q->mpl = mcf->shm_ctx->shared_mem;
         queue_initialized = 1;
       } else {
         break;
@@ -642,7 +667,7 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
   off_t           store_sz;
   ngx_uint_t      decode_len;
   ngx_str_t       plain_data, encoded_data;
-  ngx_str_t       *delim_event_key, *delim_topic_key, *topic, *event;
+  ngx_str_t       *delim_event_key, *delim_topic_key, *topic, *event, *qstr;
   ngx_array_t     *topic_arr;
   uintptr_t       *topic_p;
   ngx_uint_t      i, j;
@@ -683,25 +708,26 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
         
         topic_arr = ngx_array_create(cycle->pool, 128, sizeof(uintptr_t));
         p_tmp = pflip;
-        while ((p_tmp = get_if_contain(p_tmp, pend, delim_topic_key.data, delim_topic_key.len))) {
+        while ((p_tmp = get_if_contain(p_tmp, pend, delim_topic_key->data, delim_topic_key->len))) {
           topic_p = ngx_array_push(topic_arr);
-          p_tmp = p_tmp + delim_topic_key.len;
+          p_tmp = p_tmp + delim_topic_key->len;
           *topic_p = (uintptr_t)(u_char*)p_tmp;
         }
         
         topic_p = (uintptr_t*)topic_arr->elts;
-        for(i=0, i<topic_arr->nelts, i++){
-          pflip = (u_char*)topic_arr[i];
+        for(i=0; i<topic_arr->nelts; i++){
+          pflip = (u_char*)topic_p[i];
           if((i + 1) == topic_arr->nelts){
             pend = plain_data.data + plain_data.len;
           } else {
-            pend = (u_char*)topic_arr[i + 1];
-            pend -= delim_topic_key.len;
+            pend = (u_char*)topic_p[i + 1];
+            pend -= delim_topic_key->len;
           }
           
+          qstr = mcf->topics->elts;
           for(j=0; j < mcf->topics->nelts; j++){
-            if((p_tmp = get_if_contain(pflip, pend, delim_event_key.data, delim_event_key.len))){
-              topic = mcf->topics->elts + j;
+            if((p_tmp = get_if_contain(pflip, pend, delim_event_key->data, delim_event_key->len))){
+              topic = qstr + j;
               
               if(topic->len == (size_t)(p_tmp - pflip) && ngx_strncmp(topic->data, pflip, (p_tmp - pflip)) == 0) {
                 hash = ngx_crc32_long(topic->data, topic->len);
@@ -709,9 +735,9 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
                 if(node){
                   event_q = &node->topic_ctx->event_q;
                   if(NULL != event_q){
-                    pflip = p_tmp + delim_event_key.len;
+                    pflip = p_tmp + delim_event_key->len;
                     
-                    while((p_tmp = get_if_contain(pflip, pend, delim_event_key.data, delim_event_key.len))){
+                    while((p_tmp = get_if_contain(pflip, pend, delim_event_key->data, delim_event_key->len))){
                       event = ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_str_t) + (p_tmp - pflip));
                       if(NULL == event){
                         ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, " not enough share memory given for event message");
@@ -723,7 +749,7 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
                       ngx_memcpy(event->data, pflip, event->len);
                       
                       abqueue_enq(event_q, event);
-                      pflip = p_tmp + delim_event_key.len;
+                      pflip = p_tmp + delim_event_key->len;
                     }
                     
                     event = ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_str_t) + (pend - pflip));
@@ -733,7 +759,7 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
                     }
                     
                     event->data = ((u_char*)topic) + sizeof(ngx_str_t);
-                    event->len = p_end - pflip;
+                    event->len = pend - pflip;
                     ngx_memcpy(event->data, pflip, event->len);
                     
                     abqueue_enq(event_q, event);
@@ -744,11 +770,11 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
           }
         }
         
-        ngx_pfree(cycle->pool, delim_topic_key.data);
-        ngx_pfree(cycle->pool, delim_event_key.data);
+        ngx_pfree(cycle->pool, delim_topic_key->data);
+        ngx_pfree(cycle->pool, delim_event_key->data);
         ngx_pfree(cycle->pool, file_content);
         ngx_pfree(cycle->pool, plain_data.data);
-        ngx_array_destory(topic_arr);
+        ngx_array_destroy(topic_arr);
         
         ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " backup data %s has been restored ", local_file_path);
       }
@@ -761,7 +787,7 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
 
 ngx_int_t restore_topic_ctx(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cycle){
   ngx_uint_t i;
-  ngx_str_t *topic;
+  ngx_str_t *topic, *qstr;
   ngx_http_event_broker_node_t *node;
   ngx_http_event_broker_topic_ctx_t *topic_ctx;
   
@@ -771,8 +797,9 @@ ngx_int_t restore_topic_ctx(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t 
     return NGX_ERROR;
   }
   
-  for(i = 0, i < mcf->topics->nelts; i++){
-    topic = mcf->topics->elts + i;
+  qstr = mcf->topics->elts;
+  for(i = 0; i < mcf->topics->nelts; i++){
+    topic = qstr + i;
     ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, " Topic name \"%V\"\n", topic);
     
     node = (ngx_http_event_broker_node_t *)ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_http_event_broker_node_t));
@@ -793,7 +820,7 @@ ngx_int_t restore_topic_ctx(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t 
     
     uint32_t hash = ngx_crc32_long(topic_ctx[i].topic.data, topic_ctx[i].topic.len);
     node->sn.node.key = hash;
-    node->topic_ctx = topic_ctx[i];
+    node->topic_ctx = &topic_ctx[i];
     
     ngx_rbtree_insert(&mcf->shm_ctx->shared_mem->rbtree, &node->sn.node);
   }
@@ -824,6 +851,7 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle){
   if(mcf->topics->nelts > 0){
     delim_event_key = get_delim_event_key(cycle);
     delim_topic_key = get_delim_topic_key(cycle);
+    data_store = ngx_array_create(cycle->pool, 1024, sizeof(u_char));
     
     f_topic = mcf->topics->elts;
     for(i = 0; i < mcf->topics->nelts; i++){
@@ -831,22 +859,22 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle){
       hash = ngx_crc32_long(topic->data, topic->len);
       node = (ngx_http_event_broker_node_t *)ngx_str_rbtree_lookup(&mcf->shm_ctx->shared_mem->rbtree, topic, hash);
       if(node){
-        p_char = ngx_array_push_n(data_store, delim_topic_key.len + topic->len);
-        p_char = ngx_copy(p_char, delim_topic_key.data, delim_topic_key.len);
-        p_char = ngx_copy(p_char, topic.data, topic.len);
+        p_char = ngx_array_push_n(data_store, delim_topic_key->len + topic->len);
+        p_char = ngx_copy(p_char, delim_topic_key->data, delim_topic_key->len);
+        p_char = ngx_copy(p_char, topic->data, topic->len);
         
         queue = &node->topic_ctx->event_q;
-        while((event = abqueue_dep(queue))){
-          p_char = ngx_array_push_n(data_store, delim_event_key.len + event->len);
-          p_char = ngx_copy(p_char, delim_event_key.data, delim_topic_key.len);
-          p_char = ngx_copy(p_char, event.data, event.len);
+        while((event = abqueue_deq(queue))){
+          p_char = ngx_array_push_n(data_store, delim_event_key->len + event->len);
+          p_char = ngx_copy(p_char, delim_event_key->data, delim_topic_key->len);
+          p_char = ngx_copy(p_char, event->data, event->len);
         }
       }
     }
     
     if(data_store->nelts > 0){
       ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "event broker backup size %O bytes", data_store->nelts);
-      if(NGX_OK == backup_data_store(data_store)){
+      if(NGX_OK == backup_data_store(data_store, cycle)){
         return;
       } else {
         ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Error while storing backup data file, unable to write to file");
@@ -863,6 +891,7 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle){
 ngx_int_t backup_data_store(ngx_array_t *data_store, ngx_cycle_t *cycle){
   u_char *local_file_path;
   FILE *local_file;
+  ngx_uint_t encoded_len;
   
   local_file_path = (u_char *)ngx_palloc(cycle->pool, sizeof(EB_DATA_FILE));
   ngx_copy(local_file_path, EB_DATA_FILE, sizeof(EB_DATA_FILE));
@@ -874,7 +903,7 @@ ngx_int_t backup_data_store(ngx_array_t *data_store, ngx_cycle_t *cycle){
     plain_data.data = (u_char *)data_store->elts;
     plain_data.len = data_store->nelts;
     
-    ngx_unit_t encoded_len = ngx_base64_encoded_length(plain_data.len);
+    encoded_len = ngx_base64_encoded_length(plain_data.len);
     encoded_data.data = (u_char *)ngx_pcalloc(cycle->pool, encoded_len);
     encoded_data.len = encoded_len;
     
@@ -890,29 +919,40 @@ ngx_int_t backup_data_store(ngx_array_t *data_store, ngx_cycle_t *cycle){
 }
 
 ngx_str_t* get_delim_event_key(ngx_cycle_t *cycle){
-  ngx_str_t delim_event_key;
+  ngx_str_t *delim_event_key;
   
-  delim_event_key.len = sizeof(SPLIT_DELIM) + 2;
-  delim_event_key.data = ngx_pcalloc(cycle->pool, delim_event_key.len)
-  ngx_memcpy(delim_event_key.data, SPLIT_DELIM, sizeof(SPLIT_DELIM)); // TODO: use ngx_copy
-  ngx_memcpy(delim_event_key.data, sizeof(SPLIT_DELIM), "e@", 2);
+  delim_event_key = ngx_palloc(cycle->pool, sizeof(ngx_str_t));
+  if(NULL == delim_event_key){
+    ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "insufficient memory for delim event key");
+    return NULL;
+  }
   
-  return &delim_event_key;
+  delim_event_key->len = sizeof(SPLIT_DELIM) + (sizeof("e@") - 1);
+  delim_event_key->data = ngx_pcalloc(cycle->pool, delim_event_key->len);
+  ngx_memcpy(delim_event_key->data, SPLIT_DELIM, sizeof(SPLIT_DELIM));
+  ngx_memcpy(delim_event_key->data + sizeof(SPLIT_DELIM), "e@", (sizeof("e@") - 1));
+  
+  return delim_event_key;
 }
 
 ngx_str_t* get_delim_topic_key(ngx_cycle_t *cycle){
-  ngx_str_t delim_topic_key;
+  ngx_str_t *delim_topic_key;
   
-  delim_topic_key.len = sizeof(SPLIT_DELIM) + 2;
-  delim_topic_key.data = ngx_pcalloc(cycle->pool, delim_topic_key.len)
-  ngx_memcpy(delim_topic_key.data, SPLIT_DELIM, sizeof(SPLIT_DELIM));
-  ngx_memcpy(delim_topic_key.data, sizeof(SPLIT_DELIM), "t@", 2);
+  delim_topic_key = ngx_palloc(cycle->pool, sizeof(ngx_str_t));
+  if(NULL == delim_topic_key){
+    ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "insufficient memory for delim topic key");
+    return NULL;
+  }
   
-  return &delim_topic_key;
+  delim_topic_key->len = sizeof(SPLIT_DELIM) + (sizeof("t@") - 1);
+  delim_topic_key->data = ngx_pcalloc(cycle->pool, delim_topic_key->len);
+  ngx_memcpy(delim_topic_key->data, SPLIT_DELIM, sizeof(SPLIT_DELIM));
+  ngx_memcpy(delim_topic_key->data + sizeof(SPLIT_DELIM), "t@", (sizeof("t@") - 1));
+  
+  return delim_topic_key;
 }
 
-
-void check_worker_processes(ngx_core_conf_t *ccf){
+void check_worker_processes(ngx_core_conf_t *ccf, ngx_cycle_t *cycle){
   if(ccf->worker_processes > 1){
       ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "%s", "1 worker_processes suggested");
   }
@@ -952,7 +992,7 @@ ngx_int_t ngx_http_eb_shm_init(ngx_shm_zone_t *shm_zone, void *data) {
   ngx_slab_pool_t *shpool;
   
   if (oshm) {
-    nshm->name = oshm->name;
+    nshm->shm_zone_name = oshm->shm_zone_name;
     nshm->shared_mem = oshm->shared_mem;
     return NGX_OK;
   }
@@ -1000,7 +1040,7 @@ static char* ngx_http_eb_set_shm_size_cmd(ngx_conf_t *cf, ngx_command_t *cmd, vo
     return NGX_CONF_ERROR;
   }
   
-  shm_zone = ngx_shared_memory_add(cf, &mcf->shm_ctx->name, pg_size, &ngx_http_event_broker_module);
+  shm_zone = ngx_shared_memory_add(cf, &mcf->shm_ctx->shm_zone_name, pg_size, &ngx_http_event_broker_module);
   if (shm_zone == NULL) {
     ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "Event Broker, %s", "Unable to allocate apps defined size");
     return NGX_CONF_ERROR;
