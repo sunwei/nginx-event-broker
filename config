@@ -14,7 +14,7 @@ ngx_feature_incs="#include <abq/abqueue.h>"
 ngx_feature_path=
 ngx_feature_libs="-labqueue"
 # ngx_feature_exit_if_not_found=yes
-ngx_feature_test="abqueue_t q; abqueue_init(&q);"
+ngx_feature_test="abqueue_t q; abqueue_simple_init(&q);"
 . auto/feature
 
 if [ $ngx_found != yes ]; then
