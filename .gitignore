@@ -1,4 +1,7 @@
 .idea
 nginx-1.17.3.tar.gz
 nginx-1.17.3/
+pcre-8.41.tar.gz
+pcre-8.41/
+t/servroot/
 
