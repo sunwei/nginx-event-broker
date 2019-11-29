@@ -27,7 +27,7 @@ __DATA__
        ngx_event_broker_publish $arg_target;
     }
 --- request
-POST /processQueue?target=q1
+POST /processQueue?target=t1
 {"data":"MESSAGE1"}
 --- error_code: 202
 --- timeout: 3
