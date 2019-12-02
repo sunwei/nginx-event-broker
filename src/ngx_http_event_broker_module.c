@@ -474,6 +474,8 @@ static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx
     
     payload->len = 0;
     ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, " %s", "enqueueing" );
+    ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "eb : message size1 %z", message->len);
+    ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "eb : message1--%s--", message->data);
     abqueue_enq(ctx->targeted_topic_q, message);
     ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "eb : queue size %zu", abqueue_size(ctx->targeted_topic_q));
     ctx->req_conf = NGX_HTTP_ACCEPTED;
@@ -675,12 +677,13 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
   off_t           store_sz;
   ngx_uint_t      decode_len;
   ngx_str_t       plain_data, encoded_data;
-  ngx_str_t       *delim_event_key, *delim_topic_key, *topic, *event, *qstr;
+  ngx_str_t       *delim_event_key, *delim_topic_key, *topic, *qstr;
   ngx_array_t     *topic_arr;
   uintptr_t       *topic_p;
   ngx_uint_t      i, j;
   uint32_t        hash;
   ngx_http_event_broker_node_t *node;
+  ngx_http_event_broker_msg_t  *event;
   abqueue_t       *event_q;
   
   local_file_path = (u_char *)ngx_palloc(cycle->pool, sizeof(EB_DATA_FILE));
@@ -734,8 +737,10 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
           
           qstr = mcf->topics->elts;
           for(j=0; j < mcf->topics->nelts; j++){
+            ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : topic name %s -- %z", "456=???", j);
             if((p_tmp = get_if_contain(pflip, pend, delim_event_key->data, delim_event_key->len))){
               topic = qstr + j;
+              ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : topic222 name \"%V\"", topic);
               
               if(topic->len == (size_t)(p_tmp - pflip) && ngx_strncmp(topic->data, pflip, (p_tmp - pflip)) == 0) {
                 hash = ngx_crc32_long(topic->data, topic->len);
@@ -746,30 +751,33 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
                     pflip = p_tmp + delim_event_key->len;
                     
                     while((p_tmp = get_if_contain(pflip, pend, delim_event_key->data, delim_event_key->len))){
-                      event = ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_str_t) + (p_tmp - pflip));
+                      event = ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_http_event_broker_msg_t) + (p_tmp - pflip));
                       if(NULL == event){
                         ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, " not enough share memory given for event message");
                         return NGX_ERROR;
                       }
-                      
-                      event->data = ((u_char*)topic) + sizeof(ngx_str_t);
+
+                      event->data = ((u_char*)event) + sizeof(ngx_http_event_broker_msg_t);
                       event->len = p_tmp - pflip;
                       ngx_memcpy(event->data, pflip, event->len);
-                      
+
+                      ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : message size2 %z", event->len);
                       abqueue_enq(event_q, event);
                       pflip = p_tmp + delim_event_key->len;
                     }
                     
-                    event = ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_str_t) + (pend - pflip));
+                    event = ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_http_event_broker_msg_t) + (pend - pflip));
                     if(NULL == event){
                       ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, " not enough share memory given for event message");
                       return NGX_ERROR;
                     }
                     
-                    event->data = ((u_char*)topic) + sizeof(ngx_str_t);
+                    event->data = ((u_char*)event) + sizeof(ngx_http_event_broker_msg_t);
                     event->len = pend - pflip;
                     ngx_memcpy(event->data, pflip, event->len);
                     
+                    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : message size3 %z", event->len);
+                    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : message3--%s--", event->data);
                     abqueue_enq(event_q, event);
                   }
                 }
@@ -806,7 +814,9 @@ ngx_int_t restore_topic_ctx(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t 
   }
   
   qstr = mcf->topics->elts;
+  ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : topic pointer address1 %p", mcf->topics);
   for(i = 0; i < mcf->topics->nelts; i++){
+    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : topic name %s -- %z", "123=???", i);
     topic = qstr + i;
     ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : topic name \"%V\"", topic);
     
@@ -891,15 +901,14 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle){
         
         while((event = abqueue_deq(queue))){
           p_char = ngx_array_push_n(data_store, delim_event_key->len + event->len);
-          ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : %s", "event.1..");
           p_char = ngx_copy(p_char, delim_event_key->data, delim_event_key->len);
-          ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : %s", "event.2..");
           p_char = ngx_copy(p_char, event->data, event->len);
-          ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : %s", "event...");
+          
+          ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : event...%z--%s--%z", event->len, event->data, data_store->nelts);
         }
       }
     }
-    
+    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : %s", "event...????");
     if(data_store->nelts > 0){
       ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "event broker backup size %O bytes", data_store->nelts);
       if(NGX_OK == backup_data_store(data_store, cycle)){
@@ -1073,7 +1082,7 @@ static char* ngx_http_eb_set_shm_size_cmd(ngx_conf_t *cf, ngx_command_t *cmd, vo
     ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "eb : %s", "Unable to allocate apps defined size");
     return NGX_CONF_ERROR;
   }
-  ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "Event Broker : %s", "shm init...");
+//  ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "Event Broker : %s", "shm init...");
   shm_zone->init = ngx_http_eb_shm_init;
   shm_zone->data = mcf->shm_ctx;
   
@@ -1095,7 +1104,7 @@ static char* ngx_http_eb_publish_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *c
     return NGX_CONF_ERROR;
   }
   
-  ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "Event Broker, %s", "publish...");
+//  ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "Event Broker, %s", "publish...");
   ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
   
   ccv.cf = cf;
