@@ -17,7 +17,6 @@ typedef struct {
 typedef struct {
   ngx_str_t   topic;
   abqueue_t   event_q;
-  ngx_array_t *subscriber_urls;
 } ngx_http_event_broker_topic_ctx_t;
 
 typedef struct {
@@ -226,13 +225,8 @@ static ngx_int_t ngx_http_eb_post_conf(ngx_conf_t *cf) {
     }
     *handler = ngx_http_eb_rewrite_handler;
     
-#if (nginx_version > 1013003) //TODO, only support 17.3 above
     ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0, "event broker, %s", "USING NGX_HTTP_PRECONTENT_PHASE");
     handler = ngx_array_push(&core_main_conf->phases[NGX_HTTP_PRECONTENT_PHASE].handlers);
-#else
-    ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0, "event broker, %s", "USING NGX_HTTP_ACCESS_PHASE");
-    handler = ngx_array_push(&core_main_conf->phases[NGX_HTTP_ACCESS_PHASE].handlers);
-#endif
     
     if(NULL == handler){
       return NGX_ERROR;
@@ -300,20 +294,14 @@ static ngx_int_t ngx_http_eb_rewrite_handler(ngx_http_request_t *r) {
     }
     init_eb_context(ctx, r, targeted_q, &target_topic);
     ngx_http_set_ctx(r, ctx, ngx_http_event_broker_module);
-
     ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, " eb : %s", "context setup");
-    
     if(NULL == ctx->targeted_topic_q) {
       return NGX_DECLINED;
     }
 
     req_conf = ngx_http_read_client_request_body(r, ngx_http_eb_client_body_handler);
 
-    //TODO only support 17.3 above 
     if (req_conf == NGX_ERROR || req_conf >= NGX_HTTP_SPECIAL_RESPONSE) {
-#if (nginx_version < 1002006) || (nginx_version >= 1003000 && nginx_version < 1003009)
-      r->main->count--;
-#endif
       return req_conf;
     }
 
@@ -470,14 +458,10 @@ static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx
     }
     
     get_message_from_payload(message, payload);
-//    ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "eb : event message is \"%V\"", message);
-    
     payload->len = 0;
-    ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, " %s", "enqueueing" );
-    ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "eb : message size1 %z", message->len);
-    ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "eb : message1--%s--", message->data);
+    
     abqueue_enq(ctx->targeted_topic_q, message);
-    ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "eb : queue size %zu", abqueue_size(ctx->targeted_topic_q));
+    
     ctx->req_conf = NGX_HTTP_ACCEPTED;
   } else {
     ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, " %s", "dequeueing in every 10 sec");
@@ -490,6 +474,7 @@ static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx
           ctx->response.len = message->len;
           ngx_slab_free(ctx->shared_mem->shpool, message);
           ctx->req_conf = NGX_HTTP_OK;
+          return;
         }
       } else {
         ngx_msleep(10);
@@ -814,11 +799,8 @@ ngx_int_t restore_topic_ctx(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t 
   }
   
   qstr = mcf->topics->elts;
-  ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : topic pointer address1 %p", mcf->topics);
   for(i = 0; i < mcf->topics->nelts; i++){
-    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : topic name %s -- %z", "123=???", i);
     topic = qstr + i;
-    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : topic name \"%V\"", topic);
     
     node = (ngx_http_event_broker_node_t *)ngx_slab_alloc(mcf->shm_ctx->shared_mem->shpool, sizeof(ngx_http_event_broker_node_t));
     if(NULL == node){
@@ -878,19 +860,15 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle){
     delim_topic_key = get_delim_topic_key(cycle);
     data_store = ngx_array_create(cycle->pool, 1024, sizeof(u_char));
     
-    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb: delim \"%V\" - \"%V\"", delim_topic_key, delim_event_key);
-    
     f_topic = mcf->topics->elts;
     for(i = 0; i < mcf->topics->nelts; i++){
       topic = f_topic + i;
-      ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : topic name \"%V\"", topic);
       
       hash = ngx_crc32_long(topic->data, topic->len);
       node = (ngx_http_event_broker_node_t *)ngx_str_rbtree_lookup(&mcf->shm_ctx->shared_mem->rbtree, topic, hash);
       if(node){
         queue = &node->topic_ctx->event_q;
         
-        ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : queue size %zu", abqueue_size(queue));
         if((abqueue_size(queue)) > 0){
           p_char = ngx_array_push_n(data_store, delim_topic_key->len + topic->len);
           p_char = ngx_copy(p_char, delim_topic_key->data, delim_topic_key->len);
@@ -903,12 +881,9 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle){
           p_char = ngx_array_push_n(data_store, delim_event_key->len + event->len);
           p_char = ngx_copy(p_char, delim_event_key->data, delim_event_key->len);
           p_char = ngx_copy(p_char, event->data, event->len);
-          
-          ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : event...%z--%s--%z", event->len, event->data, data_store->nelts);
         }
       }
     }
-    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : %s", "event...????");
     if(data_store->nelts > 0){
       ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "event broker backup size %O bytes", data_store->nelts);
       if(NGX_OK == backup_data_store(data_store, cycle)){
@@ -922,7 +897,6 @@ static void ngx_http_event_broker_module_exit(ngx_cycle_t *cycle){
   } else {
     ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "No topic found to backup");
   }
-  
 }
 
 ngx_int_t backup_data_store(ngx_array_t *data_store, ngx_cycle_t *cycle){
@@ -1082,7 +1056,6 @@ static char* ngx_http_eb_set_shm_size_cmd(ngx_conf_t *cf, ngx_command_t *cmd, vo
     ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "eb : %s", "Unable to allocate apps defined size");
     return NGX_CONF_ERROR;
   }
-//  ngx_conf_log_error(NGX_LOG_EMERG, cf,  0, "Event Broker : %s", "shm init...");
   shm_zone->init = ngx_http_eb_shm_init;
   shm_zone->data = mcf->shm_ctx;
   
@@ -1104,7 +1077,6 @@ static char* ngx_http_eb_publish_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *c
     return NGX_CONF_ERROR;
   }
   
-//  ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "Event Broker, %s", "publish...");
   ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
   
   ccv.cf = cf;

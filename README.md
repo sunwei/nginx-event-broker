@@ -10,17 +10,13 @@ http {
   ngx_event_broker_topic t1;
   ngx_event_broker_topic t2;
   ngx_event_broker_topic t3;
-  ngx_event_broker_store |@| /tmp/ngx_event_broker_store_data.txt;
   ...
 
   server {
-    location /event-broker-publish {
-       ngx_event_broker_publish $arg_event;
+    location /processQueue {
+      ngx_event_broker_publish $arg_target;
     }
     
-    location /event-broker-subscribe {
-       ngx_event_broker_subscribe $arg_topic;
-    }
     ...
   }
   ...

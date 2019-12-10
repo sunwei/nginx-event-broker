@@ -33,3 +33,34 @@ POST /processQueue?target=t1
 --- timeout: 3
 --- response_headers
 Content-Type: text/plain
+
+
+=== TEST 2: enqueue q1 second time
+--- http_config eval: $::http_config
+--- config
+    location /processQueue {
+       ngx_event_broker_publish $arg_target;
+    }
+--- request
+POST /processQueue?target=t1
+{"data":"MESSAGE1"}
+--- error_code: 202
+--- timeout: 3
+--- response_headers
+Content-Type: text/plain
+
+
+=== TEST 5: dequeue q1
+--- http_config eval: $::http_config
+--- config
+    location /processQueue {
+       ngx_event_broker_publish $arg_target;
+    }
+--- request
+GET /processQueue?target=t1
+--- error_code: 200
+--- timeout: 10
+--- response_headers
+Content-Type: text/plain
+--- response_body_like eval chomp
+qr/.*?\"MESSAGE1\".*/
