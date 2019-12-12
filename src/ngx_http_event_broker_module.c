@@ -461,6 +461,7 @@ static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx
     payload->len = 0;
     
     abqueue_enq(ctx->targeted_topic_q, message);
+    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "abqueue_enq : %s", message->data);
     
     ctx->req_conf = NGX_HTTP_ACCEPTED;
   } else {
@@ -468,6 +469,7 @@ static void ngx_http_eb_process(ngx_http_request_t *r, ngx_http_event_broker_ctx
     for(i=0; i < MAX_DEQ_TRY; i++){
       if((message = abqueue_deq(ctx->targeted_topic_q))){
         if(message->len){
+          ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "abqueue_deq : %s", message->data);
           res_msg = ngx_palloc(r->pool, message->len);
           ngx_memcpy(res_msg, message->data, message->len);
           ctx->response.data = res_msg;
@@ -748,6 +750,7 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
 
                       ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : message size2 %z", event->len);
                       abqueue_enq(event_q, event);
+                      ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "abqueue_enq : %s", event->data);
                       pflip = p_tmp + delim_event_key->len;
                     }
                     
@@ -762,8 +765,8 @@ ngx_int_t restore_events(ngx_http_event_broker_main_conf_t *mcf, ngx_cycle_t *cy
                     ngx_memcpy(event->data, pflip, event->len);
                     
                     ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : message size3 %z", event->len);
-                    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "eb : message3--%s--", event->data);
                     abqueue_enq(event_q, event);
+                    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "abqueue_enq : %s", event->data);
                   }
                 }
               }
