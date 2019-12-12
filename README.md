@@ -37,7 +37,8 @@ tar -xvzf pcre-8.41.tar.gz
 cd nginx-1.17.3/
 
 # ./configure --add-module=/path/to/ngx_event_broker
-./configure --add-module=/Users/wwsun/Sunzhongmou/github/nginx-event-broker --with-pcre=../pcre-8.41
+#./configure --add-module=/Users/wwsun/Sunzhongmou/github/nginx-event-broker --with-pcre=../pcre-8.41 --with-compat
+./configure --add-dynamic-module=/Users/wwsun/Sunzhongmou/github/nginx-event-broker --with-pcre=../pcre-8.41
 
 # curl -OL https://www.openssl.org/source/openssl-1.1.0g.tar.gz
 # tar xvzf openssl-1.1.0g.tar.gz && rm openssl-1.1.0g.tar.gz 
