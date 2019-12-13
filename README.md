@@ -14,7 +14,7 @@ http {
 
   server {
     location /processQueue {
-      ngx_event_broker_publish $arg_target;
+      ngx_event_broker $arg_target;
     }
     
     ...
@@ -36,8 +36,7 @@ tar -xvzf pcre-8.41.tar.gz
 
 cd nginx-1.17.3/
 
-# ./configure --add-module=/path/to/ngx_event_broker
-#./configure --add-module=/Users/wwsun/Sunzhongmou/github/nginx-event-broker --with-pcre=../pcre-8.41 --with-compat
+#./configure --add-module=/Users/wwsun/Sunzhongmou/github/nginx-event-broker --with-pcre=../pcre-8.41
 ./configure --add-dynamic-module=/Users/wwsun/Sunzhongmou/github/nginx-event-broker --with-pcre=../pcre-8.41
 
 # curl -OL https://www.openssl.org/source/openssl-1.1.0g.tar.gz

@@ -119,7 +119,7 @@ static ngx_command_t ngx_http_event_broker_commands[] = {
     NULL
   },
   {
-    ngx_string("ngx_event_broker_publish"),
+    ngx_string("ngx_event_broker"),
     NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
     ngx_http_eb_publish_cmd,
     NGX_HTTP_LOC_CONF_OFFSET,

@@ -24,7 +24,7 @@ __DATA__
 --- http_config eval: $::http_config
 --- config
     location /processQueue {
-       ngx_event_broker_publish $arg_target;
+       ngx_event_broker $arg_target;
     }
 --- request
 POST /processQueue?target=t1
@@ -39,7 +39,7 @@ Content-Type: text/plain
 --- http_config eval: $::http_config
 --- config
     location /processQueue {
-       ngx_event_broker_publish $arg_target;
+       ngx_event_broker $arg_target;
     }
 --- request
 POST /processQueue?target=t1
@@ -54,7 +54,7 @@ Content-Type: text/plain
 --- http_config eval: $::http_config
 --- config
     location /processQueue {
-       ngx_event_broker_publish $arg_target;
+       ngx_event_broker $arg_target;
     }
 --- request
 POST /processQueue?target=t2
@@ -69,7 +69,7 @@ Content-Type: text/plain
 --- http_config eval: $::http_config
 --- config
     location /processQueue {
-       ngx_event_broker_publish $arg_target;
+       ngx_event_broker $arg_target;
     }
 --- request
 POST /processQueue?target=t3
@@ -85,7 +85,7 @@ Content-Type: text/plain
 --- http_config eval: $::http_config
 --- config
     location /processQueue {
-       ngx_event_broker_publish $arg_target;
+       ngx_event_broker $arg_target;
     }
 --- request
 POST /processQueue?target=t3
@@ -101,7 +101,7 @@ Content-Type: text/plain
 --- http_config eval: $::http_config
 --- config
     location /processQueue {
-       ngx_event_broker_publish $arg_target;
+       ngx_event_broker $arg_target;
     }
 --- request
 GET /processQueue?target=t1
@@ -117,7 +117,7 @@ qr/.*?\"MESSAGE1\".*/
 --- http_config eval: $::http_config
 --- config
     location /processQueue {
-       ngx_event_broker_publish $arg_target;
+       ngx_event_broker $arg_target;
     }
 --- request
 GET /processQueue?target=t1
@@ -133,7 +133,7 @@ qr/.*?\"MESSAGE2\".*/
 --- http_config eval: $::http_config
 --- config
     location /processQueue {
-       ngx_event_broker_publish $arg_target;
+       ngx_event_broker $arg_target;
     }
 --- request
 GET /processQueue?target=t2
@@ -149,7 +149,7 @@ qr/.*?\"MESSAGE1\".*/
 --- http_config eval: $::http_config
 --- config
     location /processQueue {
-       ngx_event_broker_publish $arg_target;
+       ngx_event_broker $arg_target;
     }
 --- request
 GET /processQueue?target=t3
@@ -166,7 +166,7 @@ qr/.*?\"MESSAGE1\".*/
 --- http_config eval: $::http_config
 --- config
     location /processQueue {
-       ngx_event_broker_publish $arg_target;
+       ngx_event_broker $arg_target;
     }
 --- request
 GET /processQueue?target=t3
