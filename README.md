@@ -28,27 +28,13 @@ Installation
 ============
 
 ```bash
-wget 'http://nginx.org/download/nginx-1.17.3.tar.gz'
-tar -xzvf nginx-1.17.3.tar.gz
+make nginx
+make pcre
+make ssl
 
-curl -OL https://ftp.pcre.org/pub/pcre/pcre-8.41.tar.gz
-tar -xvzf pcre-8.41.tar.gz
-
-cd nginx-1.17.3/
-
-#./configure --add-module=/Users/wwsun/Sunzhongmou/github/nginx-event-broker --with-pcre=../pcre-8.41
-./configure --add-dynamic-module=/Users/wwsun/Sunzhongmou/github/nginx-event-broker --with-pcre=../pcre-8.41
-
-# curl -OL https://www.openssl.org/source/openssl-1.1.0g.tar.gz
-# tar xvzf openssl-1.1.0g.tar.gz && rm openssl-1.1.0g.tar.gz 
-# ./configure --add-module=/Users/wwsun/Playground/ngx_lfqueue --with-pcre=./pcre-8.41/ --with-http_ssl_module --with-openssl=/usr/local/src/openssl-1.1.0g
-
-sudo make -j2
-sudo make install
-
-export PATH="/usr/local/nginx/sbin:$PATH" 
-curl http://localhost
-
+# For static configuration with pcre only
+# There is `conf-ssl` depends on your requirement
+make conf
 ```
 
 Test
@@ -56,7 +42,7 @@ Test
 
 ```bash
 # Install test module
-sudo cpan Test::Nginx
-cd /path/to/nginx-event-broker
-sudo prove t
+make install-test
+
+make test
 ```

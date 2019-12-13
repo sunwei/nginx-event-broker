@@ -29,11 +29,11 @@ conf-dy:
 build:
 	cd nginx-1.17.3/ &&\
 	  sudo make -j2 &&\
-	  sudo make install &&\
-	  export PATH="/usr/local/nginx/sbin:$PATH" 
+	  sudo make install
 
 install-test:
 	sudo cpan Test::Nginx
 
 test:
+	export PATH="/usr/local/nginx/sbin:$PATH" && \
 	sudo prove t
