@@ -35,6 +35,8 @@ make ssl
 # For static configuration with pcre only
 # There is `conf-ssl` depends on your requirement
 make conf
+
+make build
 ```
 
 Test
