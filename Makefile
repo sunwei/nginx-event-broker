@@ -35,4 +35,4 @@ install-test:
 	sudo cpan Test::Nginx
 
 test:
-	export PATH="/usr/local/nginx/sbin:$PATH"; sudo prove t
+	sudo prove t;

@@ -44,5 +44,6 @@ Test
 # Install test module
 make install-test
 
+export PATH="/usr/local/nginx/sbin:$PATH";
 make test
 ```
